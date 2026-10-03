@@ -1,0 +1,92 @@
+{
+  "expo": {
+    "name": "Chatmate",
+    "slug": "chat-native",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/new-logo.png",
+    "scheme": "chatnative",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bitcode": false
+    },
+    "android": {
+      "package": "com.chatmate.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#083f3d",
+        "foregroundImage": "./assets/images/new-logo.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
+      ],
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/new-logo.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/new-logo.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#083f3d",
+          "dark": {
+            "backgroundColor": "#083f3d"
+          }
+        }
+      ],
+      "expo-web-browser",
+      "expo-font",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera for video calls.",
+          "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone for audio calls."
+        }
+      ],
+      "expo-notifications",
+      "./plugins/withMessagingForegroundService",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": false,
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "enableMinifyInReleaseBuilds": true
+          }
+        }
+      ],
+      "./plugins/withAbiSplit.js",
+      "expo-secure-store",
+      "expo-image",
+      "expo-status-bar",
+      "expo-audio"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "282c335d-8f5b-46b9-83ad-92f36d5f45f5"
+      }
+    }
+  }
+}

@@ -1,0 +1,575 @@
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  View, Text, FlatList, TextInput, TouchableOpacity, KeyboardAvoidingView,
+  Platform, ActivityIndicator, Alert, Linking, StyleSheet, StatusBar, SafeAreaView,
+  ScrollView,
+} from 'react-native';
+import { Image } from 'expo-image';
+import { useLocalSearchParams, Stack, router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import * as Location from 'expo-location';
+import { Audio } from 'expo-av';
+import api from '../../../services/api';
+import { socket, connectSocket } from '../../../services/socket';
+import { useAuth } from '../../../context/AuthContext';
+import { CallContext } from '../../../context/CallContext';
+import { useAppTheme } from '../../../context/ThemeContext';
+
+interface Message {
+  _id: string; sender: string; receiver: string;
+  messageType: 'text' | 'image' | 'document' | 'location' | 'voice' | 'emoji' | 'sticker';
+  content?: string; fileUrl?: string; fileName?: string;
+  location?: { lat: number; lng: number; address?: string };
+  createdAt: string; status?: 'pending' | 'sent' | 'error';
+}
+
+const fmtTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// ── Emoji & Sticker Data ──────────────────────────────────────
+const EMOJI_CATEGORIES = [
+  { label: 'Smileys', icon: '😀', emojis: ['😀','😂','😍','🥰','😎','🤩','😭','😅','🤣','😊','🙃','😏','😒','😢','😤','😠','🥺','😳','🤯','😴','🥳','😷','🤒','🤓','🧐','🤗','😇','🤭','🫠','🥹'] },
+  { label: 'Gestures', icon: '👋', emojis: ['👋','🤚','✋','🖐','👌','✌️','🤞','🤟','🤙','👍','👎','👏','🙌','🫶','🤝','🙏','✍️','💪','🦾','☝️','👉','👈','👆','👇','🤘','🫵'] },
+  { label: 'Hearts', icon: '❤️', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💕','💞','💓','💗','💖','💘','💝','💟','❣️','💔','🫀','♥️','💋'] },
+  { label: 'Animals', icon: '🐶', emojis: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🦋','🐝','🐛','🦎','🐍','🐢','🦕'] },
+  { label: 'Food', icon: '🍕', emojis: ['🍕','🍔','🍟','🌮','🌯','🥗','🍣','🍜','🍝','🍛','🥘','🍲','🧆','🥙','🥪','🥚','🍳','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍱','🍤','🍙','🍚','🍩','🍪','🎂','🍰','🧁','🍫','🍬','🍭'] },
+  { label: 'Sports', icon: '⚽', emojis: ['⚽','🏀','🏈','⚾','🎾','🏐','🏉','🎱','🏓','🏸','🥊','🥋','🎯','⛳','🏹','🎣','🤿','🎽','🛹','🛷','🥌','⛸','🏋️','🤸','🤺','🏌️','🧘','🏄','🧗'] },
+];
+const STICKERS = [
+  '🎉','🎊','🥳','🎈','🎁','🏆','🌟','✨','💫','⭐','🌈','🌸','🌺','🌻','🌹',
+  '🦄','🐉','🦋','🦕','🌙','☀️','🌊','🔥','❄️','⚡','💥','🎵','🎶','🎸','🎺',
+  '🍀','🌴','🌵','🎋','🍁','🦚','🦜','🦢','🦩','🦁','🐯','🐻','🐼','🐨','🐸',
+];
+
+// ── Voice Player ──────────────────────────────────────────────
+const VoicePlayer = ({ url, isMe }: { url: string; isMe: boolean }) => {
+  const [sound, setSound] = useState<Audio.Sound | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [position, setPosition] = useState(0);
+  const { colors } = useAppTheme();
+
+  const handlePlayPause = async () => {
+    if (!sound) {
+      const { sound: ns } = await Audio.Sound.createAsync({ uri: url }, {}, (s: any) => {
+        if (s.isLoaded) { setDuration(s.durationMillis || 0); setPosition(s.positionMillis || 0); }
+        if (s.didJustFinish) setIsPlaying(false);
+      });
+      setSound(ns); await ns.playAsync(); setIsPlaying(true);
+    } else {
+      if (isPlaying) { await sound.pauseAsync(); setIsPlaying(false); }
+      else { await sound.playAsync(); setIsPlaying(true); }
+    }
+  };
+  useEffect(() => { return () => { if (sound) sound.unloadAsync(); }; }, [sound]);
+  const progress = duration > 0 ? position / duration : 0;
+  const fmt = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 180, paddingVertical: 2 }}>
+      <TouchableOpacity onPress={handlePlayPause} style={{ backgroundColor: isMe ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.1)', borderRadius: 20, padding: 6 }}>
+        <Ionicons name={isPlaying ? 'pause' : 'play'} size={20} color={isMe ? '#fff' : colors.primary} />
+      </TouchableOpacity>
+      <View style={{ flex: 1 }}>
+        <View style={{ height: 3, backgroundColor: isMe ? 'rgba(255,255,255,0.3)' : colors.border, borderRadius: 2 }}>
+          <View style={{ width: `${progress * 100}%`, height: '100%', backgroundColor: isMe ? '#fff' : colors.primary, borderRadius: 2 }} />
+        </View>
+        <Text style={{ fontSize: 10, color: isMe ? 'rgba(255,255,255,0.7)' : colors.textSecondary, marginTop: 3 }}>{fmt(position)} / {fmt(duration)}</Text>
+      </View>
+      <Ionicons name="mic" size={13} color={isMe ? 'rgba(255,255,255,0.7)' : colors.textSecondary} />
+    </View>
+  );
+};
+
+// ── Message Bubble ────────────────────────────────────────────
+const Bubble = React.memo(function Bubble({ item, isMe }: { item: Message; isMe: boolean }) {
+  const { colors } = useAppTheme();
+  const b = React.useMemo(() => getBubbleStyles(colors), [colors]);
+
+  if (item.messageType === 'emoji' || item.messageType === 'sticker') {
+    return (
+      <View style={[b.wrap, isMe ? b.myWrap : b.theirWrap]}>
+        <Text style={{ fontSize: item.messageType === 'sticker' ? 52 : 40 }}>{item.content}</Text>
+        <Text style={[b.emojiTime, { textAlign: isMe ? 'right' : 'left' }]}>{fmtTime(item.createdAt)}</Text>
+      </View>
+    );
+  }
+  if (item.messageType === 'image') {
+    return (
+      <View style={[b.wrap, isMe ? b.myWrap : b.theirWrap]}>
+        <View style={b.imgWrap}>
+          {item.fileUrl ? <Image source={{ uri: item.fileUrl }} style={b.img} contentFit="cover" /> : (
+            <View style={[b.img, b.imgFallback]}><Ionicons name="image-outline" size={36} color={colors.textSecondary} /></View>
+          )}
+          <View style={b.imgTimeWrap}>
+            <Text style={b.imgTimeTxt}>{fmtTime(item.createdAt)}</Text>
+            {isMe && <Ionicons name={item.status === 'pending' ? 'time-outline' : item.status === 'error' ? 'alert-circle' : 'checkmark-done'} size={12} color="rgba(255,255,255,0.85)" style={{ marginLeft: 4 }} />}
+          </View>
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View style={[b.wrap, isMe ? b.myWrap : b.theirWrap]}>
+      <View style={[b.bubble, { backgroundColor: isMe ? colors.bubbleMe : colors.bubbleThem }]}>
+        {item.messageType === 'text' && <Text style={[b.text, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextThem }]}>{item.content}</Text>}
+        {item.messageType === 'document' && (
+          <TouchableOpacity style={b.docCard} onPress={() => item.fileUrl && Linking.openURL(item.fileUrl)}>
+            <View style={[b.docIcon, { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : colors.primary + '22' }]}>
+              <Ionicons name="document-text" size={22} color={isMe ? '#fff' : colors.primary} />
+            </View>
+            <Text style={[b.docName, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextThem }]} numberOfLines={2}>{item.fileName || 'Document'}</Text>
+            <Ionicons name="open-outline" size={16} color={isMe ? 'rgba(255,255,255,0.7)' : colors.primary} />
+          </TouchableOpacity>
+        )}
+        {item.messageType === 'location' && item.location && (
+          <TouchableOpacity style={b.locCard} onPress={() => Linking.openURL(`https://www.google.com/maps?q=${item.location!.lat},${item.location!.lng}`)}>
+            <View style={[b.locIconWrap, { backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : '#ef444422' }]}>
+              <Ionicons name="location" size={20} color={isMe ? '#fff' : '#ef4444'} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[b.locTitle, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextThem }]}>📍 Location Shared</Text>
+              <Text style={[b.locAddr, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textSecondary }]} numberOfLines={2}>
+                {item.location.address || `${item.location.lat.toFixed(5)}, ${item.location.lng.toFixed(5)}`}
+              </Text>
+              <Text style={[b.locHint, { color: isMe ? 'rgba(255,255,255,0.6)' : colors.textSecondary }]}>Tap to open in Maps</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+        {item.messageType === 'voice' && item.fileUrl && <VoicePlayer url={item.fileUrl} isMe={isMe} />}
+        <View style={b.timeWrap}>
+          <Text style={[b.time, { color: isMe ? 'rgba(255,255,255,0.65)' : colors.textSecondary }]}>{fmtTime(item.createdAt)}</Text>
+          {isMe && <Ionicons name={item.status === 'pending' ? 'time-outline' : item.status === 'error' ? 'alert-circle' : 'checkmark-done'} size={12} color={item.status === 'error' ? colors.error : 'rgba(255,255,255,0.65)'} style={{ marginLeft: 4 }} />}
+        </View>
+      </View>
+    </View>
+  );
+});
+
+// ── Emoji Picker ──────────────────────────────────────────────
+const EmojiPicker = ({ onSelectEmoji, onSelectSticker }: { onSelectEmoji: (e: string) => void; onSelectSticker: (s: string) => void; }) => {
+  const [tab, setTab] = useState<'emoji' | 'sticker'>('emoji');
+  const [catIdx, setCatIdx] = useState(0);
+  const { colors } = useAppTheme();
+  return (
+    <View style={{ backgroundColor: colors.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }}>
+      <View style={{ flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }}>
+        {(['emoji', 'sticker'] as const).map(t => (
+          <TouchableOpacity key={t} onPress={() => setTab(t)} style={{ flex: 1, paddingVertical: 10, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: tab === t ? colors.primary : 'transparent' }}>
+            <Text style={{ fontSize: 13, fontWeight: '700', color: tab === t ? colors.primary : colors.textSecondary }}>
+              {t === 'emoji' ? '😀  Emojis' : '✨  Stickers'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {tab === 'emoji' ? (
+        <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 44 }} contentContainerStyle={{ paddingHorizontal: 8, alignItems: 'center', gap: 6, paddingVertical: 6 }}>
+            {EMOJI_CATEGORIES.map((cat, i) => (
+              <TouchableOpacity key={i} onPress={() => setCatIdx(i)} style={{ paddingHorizontal: 12, paddingVertical: 5, borderRadius: 16, backgroundColor: catIdx === i ? colors.primary : colors.surfaceSecondary }}>
+                <Text style={{ fontSize: 11, color: catIdx === i ? '#fff' : colors.textSecondary, fontWeight: '600' }}>{cat.icon} {cat.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+          <FlatList data={EMOJI_CATEGORIES[catIdx].emojis} keyExtractor={(item, i) => item + i} numColumns={8} style={{ maxHeight: 160 }} contentContainerStyle={{ padding: 8 }}
+            renderItem={({ item }) => (
+              <TouchableOpacity onPress={() => onSelectEmoji(item)} style={{ flex: 1, alignItems: 'center', padding: 7 }}>
+                <Text style={{ fontSize: 26 }}>{item}</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </>
+      ) : (
+        <FlatList data={STICKERS} keyExtractor={(item, i) => item + i} numColumns={7} style={{ maxHeight: 210 }} contentContainerStyle={{ padding: 8 }}
+          renderItem={({ item }) => (
+            <TouchableOpacity onPress={() => onSelectSticker(item)} style={{ flex: 1, alignItems: 'center', padding: 7 }}>
+              <Text style={{ fontSize: 38 }}>{item}</Text>
+            </TouchableOpacity>
+          )}
+        />
+      )}
+    </View>
+  );
+};
+
+// ── Chat Input Bar ────────────────────────────────────────────
+const ChatInputBar = React.memo(({
+  onSend, onSendEmoji, onSendSticker, sending, showAttach, setShowAttach, pickImage, sendLocation, sendVoiceMessage,
+}: {
+  onSend: (t: string) => void; onSendEmoji: (e: string) => void; onSendSticker: (s: string) => void;
+  sending: boolean; showAttach: boolean; setShowAttach: React.Dispatch<React.SetStateAction<boolean>>;
+  pickImage: (cam: boolean) => void; sendLocation: () => void; sendVoiceMessage: (uri: string) => void;
+}) => {
+  const [text, setText] = useState('');
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [showEmoji, setShowEmoji] = useState(false);
+  const { colors } = useAppTheme();
+  const s = React.useMemo(() => getStyles(colors), [colors]);
+
+  const handleSend = () => {
+    if (!text.trim()) return;
+    onSend(text.trim()); setText(''); setShowAttach(false); setShowEmoji(false);
+  };
+  const startRecording = async () => {
+    try {
+      const perm = await Audio.requestPermissionsAsync();
+      if (perm.status !== 'granted') return Alert.alert('Permission denied', 'Microphone access is required.');
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording: rec } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      setRecording(rec);
+    } catch { Alert.alert('Error', 'Failed to start recording'); }
+  };
+  const stopRecording = async () => {
+    if (!recording) return;
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI(); setRecording(null);
+      if (uri) sendVoiceMessage(uri);
+    } catch { Alert.alert('Error', 'Failed to stop recording'); }
+  };
+
+  return (
+    <View>
+      {showEmoji && <EmojiPicker onSelectEmoji={(e) => { setText(prev => prev + e); }} onSelectSticker={(s) => { onSendSticker(s); setShowEmoji(false); }} />}
+      <View style={s.inputBar}>
+        <TouchableOpacity onPress={() => { setShowEmoji(v => !v); setShowAttach(false); }} style={s.addBtn}>
+          <Text style={{ fontSize: 27 }}>{showEmoji ? '⌨️' : '😊'}</Text>
+        </TouchableOpacity>
+        <View style={s.inputPill}>
+          <TextInput style={s.input} value={text} onChangeText={setText} placeholder="Message…" placeholderTextColor={colors.textSecondary} multiline maxLength={1000}
+            onFocus={() => { setShowAttach(false); setShowEmoji(false); }} />
+          {text.trim() ? (
+            sending ? <ActivityIndicator size="small" color={colors.primary} style={{ paddingHorizontal: 10 }} /> : (
+              <TouchableOpacity onPress={handleSend} style={s.sendBtn}>
+                <View style={[s.sendBtnInner, { backgroundColor: colors.primary }]}>
+                  <Ionicons name="send" size={17} color="#fff" />
+                </View>
+              </TouchableOpacity>
+            )
+          ) : (
+            <View style={s.rightIcons}>
+              <TouchableOpacity onPressIn={startRecording} onPressOut={stopRecording} style={[s.iconBtn, recording && { backgroundColor: '#ef444433' }]}>
+                <Ionicons name={recording ? 'radio-button-on' : 'mic-outline'} size={21} color={recording ? '#ef4444' : colors.textSecondary} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { setShowAttach(v => !v); setShowEmoji(false); }} style={s.iconBtn}>
+                <Ionicons name="attach-outline" size={21} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+});
+ChatInputBar.displayName = 'ChatInputBar';
+
+// ── MAIN SCREEN ───────────────────────────────────────────────
+export default function ChatScreen() {
+  const params = useLocalSearchParams<{ id: string; name: string; avatar: string }>();
+  const id = Array.isArray(params.id) ? params.id[0] : params.id;
+  const name = Array.isArray(params.name) ? params.name[0] : params.name;
+  const avatar = Array.isArray(params.avatar) ? params.avatar[0] : (params.avatar || '');
+  const { userId } = useAuth();
+  const callContext = React.useContext(CallContext);
+  const { colors } = useAppTheme();
+  const s = React.useMemo(() => getStyles(colors), [colors]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [isOnline, setIsOnline] = useState(false);
+  const [showAttach, setShowAttach] = useState(false);
+  const [isSocketConnected, setIsSocketConnected] = useState(socket.connected);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const listRef = useRef<FlatList>(null);
+
+  const loadMessages = useCallback(async (pageNum: number = 1) => {
+    if (!id) return;
+    try {
+      if (pageNum === 1) setLoading(true);
+      const { data } = await api.get<Message[]>(`/messages/${id}?page=${pageNum}&limit=30`);
+      if (data.length < 30) setHasMore(false);
+      setMessages(prev => pageNum === 1 ? data : [...prev, ...data]);
+      setPage(pageNum);
+    } catch (err: any) { console.error(err?.message); }
+    finally { if (pageNum === 1) setLoading(false); }
+  }, [id]);
+  useEffect(() => { loadMessages(1); }, [loadMessages]);
+
+  useEffect(() => {
+    const onMsg = (msg: any) => {
+      const sid = typeof msg.sender === 'object' ? msg.sender._id : msg.sender;
+      const rid = typeof msg.receiver === 'object' ? msg.receiver._id : msg.receiver;
+      if ((sid === id && rid === userId) || (sid === userId && rid === id)) {
+        setMessages(prev => {
+          const exists = prev.find(m => (m._id === msg._id || (m.content === msg.content && m.status === 'pending')) && m.sender === sid);
+          if (exists) return prev.map(m => m._id === exists._id ? { ...m, ...msg, status: 'sent' } : m);
+          return [{ ...msg, sender: sid, receiver: rid, status: 'sent' }, ...prev];
+        });
+      }
+    };
+    const onOnline = (ids: string[]) => setIsOnline(ids.includes(id ?? ''));
+    const onConnect = () => setIsSocketConnected(true);
+    const onDisconnect = () => setIsSocketConnected(false);
+    socket.on('receive_message', onMsg); socket.on('getOnlineUsers', onOnline);
+    socket.on('connect', onConnect); socket.on('disconnect', onDisconnect);
+    setIsSocketConnected(socket.connected);
+    return () => {
+      socket.off('receive_message', onMsg); socket.off('getOnlineUsers', onOnline);
+      socket.off('connect', onConnect); socket.off('disconnect', onDisconnect);
+    };
+  }, [id, userId]);
+
+  const emitMessage = (payload: any, cid: string) => {
+    if (!socket.connected && userId) connectSocket(userId);
+    socket.emit('send_message', payload, (r: any) => {
+      if (r?.status === 'ok') setMessages(prev => prev.map(m => m._id === cid ? { ...r.data, status: 'sent' } : m));
+      else setMessages(prev => prev.map(m => m._id === cid ? { ...m, status: 'error' } : m));
+    });
+  };
+
+  const sendText = useCallback((t: string) => {
+    if (!t || !userId) return;
+    const cid = Date.now().toString() + Math.random().toString(36).slice(2);
+    setMessages(prev => [{ _id: cid, sender: userId, receiver: id, messageType: 'text', content: t, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+    emitMessage({ sender: userId, receiver: id, messageType: 'text', content: t }, cid);
+  }, [userId, id]);
+
+  const sendEmoji = useCallback((e: string) => {
+    if (!userId) return;
+    const cid = Date.now().toString() + Math.random().toString(36).slice(2);
+    setMessages(prev => [{ _id: cid, sender: userId, receiver: id, messageType: 'emoji', content: e, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+    emitMessage({ sender: userId, receiver: id, messageType: 'text', content: e }, cid);
+  }, [userId, id]);
+
+  const sendSticker = useCallback((st: string) => {
+    if (!userId) return;
+    const cid = Date.now().toString() + Math.random().toString(36).slice(2);
+    setMessages(prev => [{ _id: cid, sender: userId, receiver: id, messageType: 'sticker', content: st, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+    emitMessage({ sender: userId, receiver: id, messageType: 'text', content: st }, cid);
+  }, [userId, id]);
+
+  const uploadFile = async (uri: string, type: 'image' | 'document', fileName?: string) => {
+    const ext = uri.split('.').pop() || 'bin';
+    const mime = type === 'image' ? `image/${ext === 'jpg' ? 'jpeg' : ext}` : 'application/octet-stream';
+    const form = new FormData();
+    form.append('media', { uri, type: mime, name: fileName || `file.${ext}` } as any);
+    const { data } = await api.post('/upload/media', form, { headers: { 'Content-Type': 'multipart/form-data' } });
+    if (!data.filePath) throw new Error('No filePath');
+    return data.filePath as string;
+  };
+
+  const pickImage = async (useCamera = false) => {
+    setShowAttach(false); let cid = '';
+    try {
+      let res: ImagePicker.ImagePickerResult;
+      if (useCamera) {
+        const p = await ImagePicker.requestCameraPermissionsAsync();
+        if (!p.granted) return Alert.alert('Permission required');
+        res = await ImagePicker.launchCameraAsync({ quality: 0.8 });
+      } else { res = await ImagePicker.launchImageLibraryAsync({ quality: 0.8 }); }
+      if (res.canceled) return;
+      const localUri = res.assets[0].uri;
+      cid = Date.now().toString() + Math.random().toString(36).slice(2);
+      setMessages(prev => [{ _id: cid, sender: userId!, receiver: id, messageType: 'image', fileUrl: localUri, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+      setSending(true);
+      const url = await uploadFile(localUri, 'image');
+      emitMessage({ sender: userId, receiver: id, messageType: 'image', fileUrl: url }, cid);
+    } catch {
+      if (cid) setMessages(prev => prev.map(m => m._id === cid ? { ...m, status: 'error' } : m));
+      Alert.alert('Error', 'Failed to send image.');
+    } finally { setSending(false); }
+  };
+
+  const pickDocument = async () => {
+    setShowAttach(false); let cid = '';
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ type: '*/*' });
+      if (res.canceled) return;
+      const file = res.assets[0];
+      cid = Date.now().toString() + Math.random().toString(36).slice(2);
+      setMessages(prev => [{ _id: cid, sender: userId!, receiver: id, messageType: 'document', fileName: file.name, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+      setSending(true);
+      const url = await uploadFile(file.uri, 'document', file.name);
+      emitMessage({ sender: userId, receiver: id, messageType: 'document', fileUrl: url, fileName: file.name }, cid);
+    } catch {
+      if (cid) setMessages(prev => prev.map(m => m._id === cid ? { ...m, status: 'error' } : m));
+      Alert.alert('Error', 'Failed to send document.');
+    } finally { setSending(false); }
+  };
+
+  const sendLocation = async () => {
+    setShowAttach(false);
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') return Alert.alert('Permission denied', 'Enable location access.');
+    try {
+      setSending(true);
+      let loc = await Location.getLastKnownPositionAsync({});
+      if (!loc) loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      if (!loc) return;
+      let address = '';
+      try {
+        const geo = await Location.reverseGeocodeAsync({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+        if (geo.length > 0) {
+          const g = geo[0];
+          address = [g.name, g.district, g.city, g.region].filter(Boolean).slice(0, 3).join(', ');
+        }
+      } catch { /* fallback to coords */ }
+      const cid = Date.now().toString() + Math.random().toString(36).slice(2);
+      setMessages(prev => [{ _id: cid, sender: userId!, receiver: id, messageType: 'location', location: { lat: loc!.coords.latitude, lng: loc!.coords.longitude, address }, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+      socket.emit('send_message', { sender: userId, receiver: id, messageType: 'location', location: { lat: loc.coords.latitude, lng: loc.coords.longitude, address } }, (r: any) => {
+        if (r?.status === 'ok') setMessages(prev => prev.map(m => m._id === cid ? { ...r.data, status: 'sent' } : m));
+        else setMessages(prev => prev.map(m => m._id === cid ? { ...m, status: 'error' } : m));
+      });
+    } catch (err: any) { Alert.alert('Error', err?.message || 'Could not get location.'); }
+    finally { setSending(false); }
+  };
+
+  const sendVoiceMessage = async (uri: string) => {
+    const cid = Date.now().toString() + Math.random().toString(36).slice(2);
+    try {
+      setMessages(prev => [{ _id: cid, sender: userId!, receiver: id, messageType: 'voice', fileUrl: uri, createdAt: new Date().toISOString(), status: 'pending' }, ...prev]);
+      setSending(true);
+      const url = await uploadFile(uri, 'document', 'voice.m4a');
+      emitMessage({ sender: userId, receiver: id, messageType: 'voice', fileUrl: url }, cid);
+    } catch {
+      setMessages(prev => prev.map(m => m._id === cid ? { ...m, status: 'error' } : m));
+      Alert.alert('Error', 'Failed to send voice message.');
+    } finally { setSending(false); }
+  };
+
+  const displayName = name || 'Chat';
+
+  return (
+    <View style={s.root}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.headerBackground} />
+      <Stack.Screen options={{ headerShown: false }} />
+      <SafeAreaView style={s.headerSafe}>
+        <View style={s.header}>
+          <TouchableOpacity onPress={() => router.back()} style={s.headerBack}>
+            <Ionicons name="arrow-back" size={24} color={colors.headerIcon} />
+          </TouchableOpacity>
+          <View style={s.headerAvatar}>
+            {avatar ? <Image source={{ uri: avatar }} style={{ width: 42, height: 42, borderRadius: 21 }} /> : <Text style={s.headerAvatarText}>{displayName.charAt(0).toUpperCase()}</Text>}
+            {isOnline && <View style={s.onlineDot} />}
+          </View>
+          <View style={s.headerInfo}>
+            <Text style={s.headerName} numberOfLines={1}>{displayName}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              {isOnline && <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.success }} />}
+              <Text style={[s.headerStatus, { color: isOnline ? colors.success : colors.textSecondary }]}>{isOnline ? 'Active now' : 'Offline'}</Text>
+            </View>
+          </View>
+          <View style={s.headerActions}>
+            <TouchableOpacity onPress={() => callContext?.startCall(id, false)} style={s.headerIcon}>
+              <Ionicons name="call-outline" size={21} color={colors.headerIcon} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => callContext?.startCall(id, true)} style={s.headerIcon}>
+              <Ionicons name="videocam-outline" size={22} color={colors.headerIcon} />
+            </TouchableOpacity>
+          </View>
+        </View>
+        {!isSocketConnected && <View style={{ backgroundColor: colors.error, paddingVertical: 4, alignItems: 'center' }}><Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>Reconnecting…</Text></View>}
+      </SafeAreaView>
+
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={0}>
+        {loading ? (
+          <View style={s.center}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={{ color: colors.textSecondary, marginTop: 10, fontSize: 13 }}>Loading messages…</Text>
+          </View>
+        ) : (
+          <FlatList ref={listRef} data={messages} inverted keyExtractor={item => item._id}
+            renderItem={({ item }) => { const sid = typeof item.sender === 'object' ? (item.sender as any)._id : item.sender; return <Bubble item={item} isMe={sid === userId} />; }}
+            contentContainerStyle={{ padding: 12, paddingBottom: 8, flexGrow: 1 }}
+            onEndReached={() => { if (hasMore) loadMessages(page + 1); }}
+            onEndReachedThreshold={0.5} initialNumToRender={15} maxToRenderPerBatch={10} windowSize={5}
+            removeClippedSubviews={Platform.OS === 'android'}
+            ListEmptyComponent={
+              <View style={s.empty}>
+                <Text style={{ fontSize: 54 }}>👋</Text>
+                <Text style={s.emptyTxt}>Say hello to {displayName}!</Text>
+                <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 4 }}>Start a conversation</Text>
+              </View>
+            }
+          />
+        )}
+        {showAttach && (
+          <View style={s.attachTray}>
+            {[
+              { icon: 'camera', label: 'Camera', color: '#6366f1', action: () => pickImage(true) },
+              { icon: 'images', label: 'Gallery', color: '#0ea5e9', action: () => pickImage(false) },
+              { icon: 'document-text', label: 'Document', color: '#f59e0b', action: pickDocument },
+              { icon: 'location', label: 'Location', color: '#ef4444', action: sendLocation },
+            ].map(btn => (
+              <TouchableOpacity key={btn.label} style={s.attachItem} onPress={btn.action}>
+                <View style={[s.attachIcon, { backgroundColor: btn.color }]}>
+                  <Ionicons name={btn.icon as any} size={22} color="#fff" />
+                </View>
+                <Text style={s.attachLabel}>{btn.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+        <ChatInputBar onSend={sendText} onSendEmoji={sendEmoji} onSendSticker={sendSticker} sending={sending}
+          showAttach={showAttach} setShowAttach={setShowAttach} pickImage={pickImage}
+          sendLocation={sendLocation} sendVoiceMessage={sendVoiceMessage} />
+      </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+const getBubbleStyles = (colors: any) => StyleSheet.create({
+  wrap: { marginVertical: 3, paddingHorizontal: 12 },
+  myWrap: { alignItems: 'flex-end' }, theirWrap: { alignItems: 'flex-start' },
+  emojiTime: { fontSize: 10, color: colors.textSecondary, marginTop: 2 },
+  bubble: { maxWidth: '78%', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.10, shadowRadius: 3, elevation: 2 },
+  text: { fontSize: 15.5, lineHeight: 22 },
+  timeWrap: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-end', marginTop: 5 },
+  time: { fontSize: 10 },
+  imgWrap: { position: 'relative', maxWidth: '78%', borderRadius: 20, overflow: 'hidden' },
+  img: { width: 220, height: 280, borderRadius: 20 },
+  imgFallback: { justifyContent: 'center', alignItems: 'center', backgroundColor: colors.surfaceSecondary },
+  imgTimeWrap: { position: 'absolute', bottom: 10, right: 12, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
+  imgTimeTxt: { color: 'rgba(255,255,255,0.9)', fontSize: 11, fontWeight: '600' },
+  docCard: { flexDirection: 'row', alignItems: 'center', gap: 10, minWidth: 180 },
+  docIcon: { width: 40, height: 40, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  docName: { flex: 1, fontSize: 13, fontWeight: '500', lineHeight: 18 },
+  locCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, minWidth: 200 },
+  locIconWrap: { width: 40, height: 40, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 2 },
+  locTitle: { fontSize: 13, fontWeight: '700' },
+  locAddr: { fontSize: 12, lineHeight: 17, marginTop: 2 },
+  locHint: { fontSize: 10, marginTop: 4 },
+});
+
+const getStyles = (colors: any) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.background },
+  headerSafe: { backgroundColor: colors.headerBackground },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 8, paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) + 6 : 8, backgroundColor: colors.headerBackground, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  headerBack: { paddingRight: 6 },
+  headerAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.primary, justifyContent: 'center', alignItems: 'center', marginRight: 10, position: 'relative' },
+  headerAvatarText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  onlineDot: { position: 'absolute', bottom: 1, right: 1, width: 12, height: 12, borderRadius: 6, backgroundColor: colors.success, borderWidth: 2, borderColor: colors.headerBackground },
+  headerInfo: { flex: 1 },
+  headerName: { color: colors.text, fontSize: 16, fontWeight: '700' },
+  headerStatus: { fontSize: 11, marginTop: 1 },
+  headerActions: { flexDirection: 'row', alignItems: 'center' },
+  headerIcon: { padding: 7 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  empty: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 60 },
+  emptyTxt: { color: colors.text, fontSize: 17, fontWeight: '600', marginTop: 10 },
+  attachTray: { flexDirection: 'row', justifyContent: 'space-around', backgroundColor: colors.surface, paddingVertical: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  attachItem: { alignItems: 'center', gap: 5 },
+  attachIcon: { width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center' },
+  attachLabel: { color: colors.textSecondary, fontSize: 11, fontWeight: '500' },
+  inputBar: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 10, paddingVertical: 8, paddingBottom: Platform.OS === 'ios' ? 24 : 10, backgroundColor: colors.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, gap: 8 },
+  addBtn: { paddingBottom: 5, justifyContent: 'center' },
+  inputPill: { flex: 1, flexDirection: 'row', alignItems: 'flex-end', backgroundColor: colors.surfaceSecondary, borderRadius: 24, paddingHorizontal: 14, paddingVertical: 6, minHeight: 48, borderWidth: 1, borderColor: colors.border },
+  input: { flex: 1, color: colors.text, fontSize: 15.5, paddingTop: 8, paddingBottom: 8, maxHeight: 120 },
+  sendBtn: { paddingLeft: 8, paddingBottom: 4, justifyContent: 'center' },
+  sendBtnInner: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  rightIcons: { flexDirection: 'row', alignItems: 'center', paddingBottom: 6, gap: 2 },
+  iconBtn: { padding: 6, borderRadius: 20 },
+});
